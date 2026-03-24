@@ -1,5 +1,9 @@
 {
+  "name": "distributed-log-system",
+  "version": "1.0.0",
+  "main": "app.js",
   "dependencies": {
+    "axios": "^1.13.6",
     "express": "^5.2.1"
   }
 }

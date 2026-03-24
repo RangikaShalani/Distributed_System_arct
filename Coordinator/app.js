@@ -1,13 +1,27 @@
-const express = require('express');
+const express = require("express");
+const cluster = require("./core/clusterManager");
+const heartbeat = require("./core/heartbeat");
+
 const app = express();
-const port = 8000;
+app.use(express.json());
 
-// Define a basic route
-app.get('/', (req, res) => {
-    res.send('Hello World!');
-});
+const PORT = process.argv[2] || 8000;
+const FILE_PATH = process.argv[3]; // only for coordinator
 
-// Start the server
-app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+cluster.init(PORT, FILE_PATH);
+
+// heartbeat
+heartbeat.start();
+
+// routes
+app.post("/register", cluster.registerNode);
+app.get("/heartbeat", (req, res) => res.send("alive"));
+app.get("/start", cluster.startJob);
+
+app.post("/map", require("./roles/mapper"));
+app.post("/validate", require("./roles/validator"));
+app.post("/aggregate", require("./roles/aggregator"));
+
+app.listen(PORT, () => {
+    console.log(`Node running on ${PORT}`);
 });
