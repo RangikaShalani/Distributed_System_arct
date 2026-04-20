@@ -1,20 +1,50 @@
 const axios = require("axios");
 const cluster = require("./clusterManager");
 
+const HEARTBEAT_INTERVAL_MS = 3000;
+const LEADER_TIMEOUT_MS = 7000;
+
 function start() {
     setInterval(async () => {
-        const nodes = cluster.getNodes();
+        const self = cluster.getSelf();
+        const snapshot = cluster.getClusterView();
+        const nodes = Object.values(snapshot.nodes || {});
 
-        for (let port in nodes) {
-            try {
-                await axios.get(`http://localhost:${port}/heartbeat`);
-                nodes[port].status = "alive";
-            } catch {
-                nodes[port].status = "dead";
-                console.log(`Node ${port} is DEAD`);
+        if (cluster.isLeader()) {
+            for (const node of nodes) {
+                if (node.id === self.id) continue;
+
+                try {
+                    const res = await axios.get(`http://localhost:${node.port}/heartbeat`, { timeout: 1000 });
+                    cluster.monitorNodeHealth(res.data);
+                } catch {
+                    cluster.markNodeDead(node.id, "heartbeat-timeout");
+                }
             }
+
+            return;
         }
-    }, 5000);
+
+        const leaderId = snapshot.leaderId;
+        if (!leaderId) {
+            cluster.handleLeaderFailure();
+            return;
+        }
+
+        const leaderPort = Number(String(leaderId).split(":")[1]);
+
+        try {
+            const res = await axios.get(`http://localhost:${leaderPort}/heartbeat`, { timeout: 1000 });
+            cluster.handleLeaderHeartbeat(res.data.leaderId);
+            cluster.monitorNodeHealth(res.data);
+        } catch {
+            cluster.handleLeaderFailure();
+        }
+
+        if (Date.now() - cluster.getClusterView().lastLeaderHeartbeat > LEADER_TIMEOUT_MS) {
+            cluster.handleLeaderFailure();
+        }
+    }, HEARTBEAT_INTERVAL_MS);
 }
 
 module.exports = { start };

@@ -1,18 +1,18 @@
-const proxy = require("../sidecar/proxy");
+const summarizeChunk = require("../utils/summarizer");
 
 module.exports = async (req, res) => {
-    const { result, taskId, aggregator } = req.body;
+    const { jobId, chunkId, chunk, mapperResult, startLine, endLine } = req.body;
 
-    console.log("Validator checking...");
+    console.log(`Validator checking ${chunkId} (${startLine}-${endLine})`);
 
-    const isValid = true; // simple for now
+    const recomputed = summarizeChunk(chunk);
+    const accepted = JSON.stringify(recomputed) === JSON.stringify(mapperResult);
 
-    if (isValid) {
-        await proxy.send(`http://localhost:${aggregator}/aggregate`, {
-            result,
-            taskId,
-        });
-    }
-
-    res.send("Validated");
+    res.json({
+        jobId,
+        chunkId,
+        accepted,
+        validatorAt: Date.now(),
+        reason: accepted ? "MATCH" : "MISMATCH",
+    });
 };

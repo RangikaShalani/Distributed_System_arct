@@ -1,19 +1,45 @@
-let finalResult = {};
-let processed = new Set();
+const finalResults = {};
 
 module.exports = (req, res) => {
-    const { result, taskId } = req.body;
+    const { jobId, chunkId, result, validation } = req.body;
 
-    if (processed.has(taskId)) return res.send("Duplicate");
-
-    processed.add(taskId);
-
-    for (let key in result) {
-        if (!finalResult[key]) finalResult[key] = 0;
-        finalResult[key] += result[key].count;
+    if (!finalResults[jobId]) {
+        finalResults[jobId] = {
+            processedChunks: new Set(),
+            totals: {},
+            uniqueMessages: {},
+        };
     }
 
-    console.log("FINAL RESULT:", finalResult);
+    const job = finalResults[jobId];
 
-    res.send("Aggregated");
+    if (job.processedChunks.has(chunkId)) {
+        return res.send("Duplicate");
+    }
+
+    job.processedChunks.add(chunkId);
+
+    for (const [severity, summary] of Object.entries(result)) {
+        if (!job.totals[severity]) {
+            job.totals[severity] = 0;
+            job.uniqueMessages[severity] = new Set();
+        }
+
+        job.totals[severity] += summary.count;
+        summary.messages.forEach(message => job.uniqueMessages[severity].add(message));
+    }
+
+    const output = Object.entries(job.totals).map(([severity, count]) => ({
+        severity,
+        count,
+        uniqueMessages: job.uniqueMessages[severity].size,
+    }));
+
+    console.log(`FINAL RESULT (${jobId})`, output, validation || {});
+    res.json({
+        status: "aggregated",
+        jobId,
+        chunkId,
+        output,
+    });
 };

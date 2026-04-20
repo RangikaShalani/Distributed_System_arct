@@ -15,7 +15,12 @@ heartbeat.start();
 
 // routes
 app.post("/register", cluster.registerNode);
-app.get("/heartbeat", (req, res) => res.send("alive"));
+app.post("/cluster/join", cluster.registerNode);
+app.get("/cluster/status", cluster.clusterStatus);
+app.post("/cluster/sync", cluster.syncCluster);
+app.post("/cluster/election", cluster.electionHandler);
+app.post("/cluster/coordinator", cluster.coordinatorHandler);
+app.get("/heartbeat", cluster.heartbeatAck);
 app.get("/start", cluster.startJob);
 
 app.post("/map", require("./roles/mapper"));

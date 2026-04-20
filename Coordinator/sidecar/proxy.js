@@ -4,14 +4,13 @@ async function send(url, data) {
     const start = Date.now();
 
     try {
-        const res = await axios.post(url, data);
-
+        const res = await axios.post(url, data, { timeout: 3000 });
         console.log(`[Proxy] ${url} (${Date.now() - start}ms)`);
-
         return res.data;
     } catch (err) {
         console.log(`[Retry] ${url}`);
-        return axios.post(url, data);
+        const retry = await axios.post(url, data, { timeout: 3000 });
+        return retry.data;
     }
 }
 

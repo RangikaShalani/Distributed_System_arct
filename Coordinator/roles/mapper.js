@@ -1,35 +1,57 @@
-const parse = require("../utils/parser");
 const proxy = require("../sidecar/proxy");
+const summarizeChunk = require("../utils/summarizer");
 
 module.exports = async (req, res) => {
-    const { chunk, taskId, validators, aggregator } = req.body;
+    const { chunk, jobId, chunkId, startLine, endLine, validators, aggregator } = req.body;
 
-    console.log("Mapper processing chunk...");
+    console.log(`Mapper processing ${chunkId} (${startLine}-${endLine})`);
 
-    let result = {};
+    const result = summarizeChunk(chunk);
+    const validatorRequests = validators.map(port =>
+        proxy.send(`http://localhost:${port}/validate`, {
+            jobId,
+            chunkId,
+            chunk,
+            mapperResult: result,
+            startLine,
+            endLine,
+        })
+    );
 
-    chunk.forEach(line => {
-        const severity = parse(line);
+    const settled = await Promise.allSettled(validatorRequests);
+    const votes = settled
+        .filter(item => item.status === "fulfilled")
+        .map(item => item.value)
+        .filter(Boolean);
 
-        if (!result[severity]) {
-            result[severity] = { count: 0, messages: new Set() };
-        }
+    const accepted = votes.filter(vote => vote.accepted).length;
+    const quorum = Math.floor(validators.length / 2) + 1;
 
-        result[severity].count++;
-        result[severity].messages.add(line);
-    });
-
-    Object.keys(result).forEach(k => {
-        result[k].messages = Array.from(result[k].messages);
-    });
-
-    for (let port of validators) {
-        await proxy.send(`http://localhost:${port}/validate`, {
+    if (accepted >= quorum) {
+        await proxy.send(`http://localhost:${aggregator}/aggregate`, {
+            jobId,
+            chunkId,
             result,
-            taskId,
-            aggregator,
+            validation: {
+                quorum,
+                accepted,
+                validators,
+            },
+        });
+
+        return res.json({
+            status: "validated",
+            chunkId,
+            accepted,
+            quorum,
         });
     }
 
-    res.send("Mapped");
+    res.status(409).json({
+        status: "rejected",
+        chunkId,
+        accepted,
+        quorum,
+        votes,
+    });
 };
