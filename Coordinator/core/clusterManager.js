@@ -1,4 +1,5 @@
 const fs = require("fs");
+const readline = require("readline");
 const axios = require("axios");
 const proxy = require("../sidecar/proxy");
 
@@ -19,11 +20,12 @@ const state = {
     electionInProgress: false,
     lastLeaderHeartbeat: 0,
 };
+let pendingFilePrompt = null;
 
-function init(port, filePath) {
+function init(port) {
     state.selfPort = Number(port);
     state.selfId = toNodeId(state.selfPort);
-    state.filePath = filePath || null;
+    state.filePath = null;
     state.lastLeaderHeartbeat = Date.now();
 
     ensureNodeRecord(state.selfPort, {
@@ -473,9 +475,12 @@ async function startJob(req, res) {
         console.log("Received job start request but not leader. Rejecting.");
         return res.status(403).send("Not coordinator");
     }
-    if (!state.filePath) {
-        console.log("Received job start request but no file provided. Rejecting.");
-        return res.status(400).send("No file provided");
+
+    try {
+        state.filePath = await promptForJobFilePath();
+    } catch (err) {
+        console.log("Failed to read file path from terminal:", err.message);
+        return res.status(500).send("Failed to read file path from terminal");
     }
 
     rebalanceClusterRoles();
@@ -537,6 +542,58 @@ async function startJob(req, res) {
 
     await Promise.allSettled(dispatches);
     res.send(`Job ${jobId} started`);
+}
+
+async function promptForJobFilePath() {
+    if (pendingFilePrompt) {
+        return pendingFilePrompt;
+    }
+
+    pendingFilePrompt = (async () => {
+        while (true) {
+            const candidatePath = await askTerminalQuestion("Enter log file path for this job: ");
+            const trimmedPath = candidatePath.trim();
+
+            if (!trimmedPath) {
+                console.log("File path cannot be empty. Please try again.");
+                continue;
+            }
+
+            if (!fs.existsSync(trimmedPath)) {
+                console.log(`File not found: ${trimmedPath}`);
+                continue;
+            }
+
+            const stats = fs.statSync(trimmedPath);
+            if (!stats.isFile()) {
+                console.log(`Not a file: ${trimmedPath}`);
+                continue;
+            }
+
+            console.log(`Job file selected: ${trimmedPath}`);
+            return trimmedPath;
+        }
+    })();
+
+    try {
+        return await pendingFilePrompt;
+    } finally {
+        pendingFilePrompt = null;
+    }
+}
+
+function askTerminalQuestion(question) {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    return new Promise(resolve => {
+        rl.question(question, answer => {
+            rl.close();
+            resolve(answer);
+        });
+    });
 }
 
 function chooseValidatorsForMapper(validators, mapperIndex) {
