@@ -37,7 +37,7 @@ module.exports = (req, res) => {
         uniqueMessages: job.uniqueMessages[severity].size,
     }));
 
-    console.log(`FINAL RESULT (${jobId})`, output, validation || {});
+    console.log(`FINAL RESULT (${jobId})`, output);
     res.json({
         status: "aggregated",
         jobId,
