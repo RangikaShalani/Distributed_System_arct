@@ -3,6 +3,8 @@ const finalResults = {};
 module.exports = (req, res) => {
     const { jobId, chunkId, result, validation } = req.body;
 
+    console.log(`Aggregator received result for ${chunkId} of job ${jobId}:`, result, validation || {});
+
     if (!finalResults[jobId]) {
         finalResults[jobId] = {
             processedChunks: new Set(),
@@ -26,7 +28,7 @@ module.exports = (req, res) => {
         }
 
         job.totals[severity] += summary.count;
-        summary.messages.forEach(message => job.uniqueMessages[severity].add(message));
+        (summary.messages || []).forEach(message => job.uniqueMessages[severity].add(message));
     }
 
     const output = Object.entries(job.totals).map(([severity, count]) => ({

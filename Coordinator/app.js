@@ -3,7 +3,7 @@ const cluster = require("./core/clusterManager");
 const heartbeat = require("./core/heartbeat");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "50mb" }));
 
 const PORT = process.argv[2] || 8000;
 const FILE_PATH = process.argv[3]; // only for coordinator

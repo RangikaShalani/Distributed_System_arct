@@ -1,17 +1,33 @@
 const proxy = require("../sidecar/proxy");
 const summarizeChunk = require("../utils/summarizer");
+const readChunk = require("../utils/chunkReader");
 
 module.exports = async (req, res) => {
-    const { chunk, jobId, chunkId, startLine, endLine, validators, aggregator } = req.body;
+    const {
+        chunk,
+        jobId,
+        chunkId,
+        startLine,
+        endLine,
+        validators,
+        aggregator,
+        sourceFilePath,
+    } = req.body;
+    const materializedChunk = readChunk({ chunk, sourceFilePath, startLine, endLine });
 
     console.log(`Mapper processing ${chunkId} (${startLine}-${endLine})`);
 
-    const result = summarizeChunk(chunk);
+    const result = summarizeChunk(materializedChunk);
+
+    console.log(`Mapper result for ${chunkId}:`, result);
+
+    console.log(`Sending validation requests for ${chunkId} to validators:`, validators);
+
     const validatorRequests = validators.map(port =>
         proxy.send(`http://localhost:${port}/validate`, {
             jobId,
             chunkId,
-            chunk,
+            sourceFilePath,
             mapperResult: result,
             startLine,
             endLine,
@@ -28,6 +44,7 @@ module.exports = async (req, res) => {
     const quorum = Math.floor(validators.length / 2) + 1;
 
     if (accepted >= quorum) {
+        console.log(`Chunk ${chunkId} accepted by quorum (${accepted}/${validators.length}). Sending to aggregator ${aggregator}.`);
         await proxy.send(`http://localhost:${aggregator}/aggregate`, {
             jobId,
             chunkId,
@@ -46,6 +63,8 @@ module.exports = async (req, res) => {
             quorum,
         });
     }
+
+    console.log(`Chunk ${chunkId} rejected by quorum (${accepted}/${validators.length}).`);
 
     res.status(409).json({
         status: "rejected",

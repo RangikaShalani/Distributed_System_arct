@@ -12,10 +12,15 @@
 ### Dynamic joining
 - A new node can start at any time.
 - It discovers the current leader by probing peers.
-- The leader adds the new node to membership, assigns the role with these priorities:
-  - first available non-leader node becomes `AGGREGATOR`
-  - next two non-leader nodes become `VALIDATOR`
-  - all remaining nodes become `MAPPER`
+- The leader adds the new node to membership and recalculates all non-leader roles from scratch.
+- The minimum worker layout is enforced first:
+  - first non-leader node becomes `AGGREGATOR`
+  - next two worker nodes become `VALIDATOR`
+  - next worker node becomes `MAPPER`
+- After the minimum layout is satisfied, each new worker role depends on current worker counts:
+  - if `mapperCount <= validatorCount`, assign `MAPPER`
+  - otherwise assign `VALIDATOR`
+- This means the cluster always has the minimum validation set first, then keeps mappers slightly ahead or equalized over time.
 - After each join, the Coordinator rebroadcasts the new configuration to every participant.
 
 ### Failure detection
@@ -35,7 +40,7 @@
   - `chunkId`
   - `startLine`
   - `endLine`
-  - validator targets
+  - validator targets 
   - aggregator target
 
 ### Why it load-balances well
@@ -97,6 +102,11 @@ Mapper -> Aggregator: /aggregate(validatedResult)
 - Quorum is `floor(numberOfValidators / 2) + 1`.
 - With two validators, both must accept.
 - With three validators, any two acceptances are enough.
+- Because the current role pattern grows validators gradually, `/start` succeeds only after the cluster has at least:
+  - 1 Coordinator
+  - 1 Aggregator
+  - 2 Validators
+  - 1 Mapper
 
 ### Mismatch handling
 - If quorum is not reached, the mapper marks the chunk as rejected and does not forward it to the Aggregator.
@@ -136,6 +146,7 @@ Mapper -> Aggregator: /aggregate(validatedResult)
 - The Coordinator tracks the Aggregator with heartbeats.
 - If the Aggregator dies, the Coordinator immediately promotes another live non-leader node.
 - The preferred replacement is an existing validator; otherwise any live mapper is promoted.
+- After aggregator reassignment, the Coordinator rebalances the remaining worker roles again using the same minimum-role-first rule.
 - The updated cluster view is broadcast to all nodes, so future mapper results target the new Aggregator automatically.
 
 ## 7. Communication Model

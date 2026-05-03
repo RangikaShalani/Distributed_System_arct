@@ -2,7 +2,7 @@ const fs = require("fs");
 const axios = require("axios");
 const proxy = require("../sidecar/proxy");
 
-const DEFAULT_PORT_RANGE = { start: 8000, end: 8010 };
+const DEFAULT_PORT_RANGE = { start: 8000, end: 8080 };
 const HOST = "localhost";
 const CLUSTER_SYNC_DELAY_MS = 200;
 
@@ -112,23 +112,24 @@ function registerNode(req, res) {
     const { port, nodeId } = req.body;
     const joinPort = Number(port);
     const joinId = nodeId || toNodeId(joinPort);
-    const assignedRole = assignRole(joinId);
 
     state.nodes[joinId] = {
         id: joinId,
         port: joinPort,
-        role: assignedRole,
+        role: "UNASSIGNED",
         status: "alive",
         lastSeen: Date.now(),
     };
 
     bumpVersion();
-    console.log(`Node ${joinPort} -> ${assignedRole}`);
     rebalanceClusterRoles();
     broadcastClusterConfig();
 
+    const assignedRole = assignRole(joinId);
+    console.log(`Node ${joinPort} -> ${assignedRole} joined the cluster`);
+
     res.json({
-        role: state.nodes[joinId].role,
+        role: assignedRole,
         snapshot: buildSnapshot(),
     });
 }
@@ -371,13 +372,26 @@ function ensureNodeRecord(portOrId, details = {}) {
 }
 
 function assignRole(nodeId) {
-    const aliveRoles = getAliveNodes()
-        .filter(node => node.id !== nodeId)
-        .map(node => node.role);
+    const candidates = getAliveNodes()
+        .filter(node => node.id !== state.leaderId)
+        .map(node => ({ ...node }));
 
-    if (!aliveRoles.includes("AGGREGATOR")) return "AGGREGATOR";
-    if (aliveRoles.filter(role => role === "VALIDATOR").length < 2) return "VALIDATOR";
-    return "MAPPER";
+    if (!candidates.find(node => node.id === nodeId)) {
+        candidates.push({
+            id: nodeId,
+            port: nodeIdToPort(nodeId),
+            role: "UNASSIGNED",
+            status: "alive",
+        });
+    }
+
+    const aggregatorId =
+        state.aggregatorId && candidates.find(node => node.id === state.aggregatorId)
+            ? state.aggregatorId
+            : chooseAggregatorCandidate(candidates)?.id || null;
+
+    const rolePlan = buildRolePlan(candidates, aggregatorId);
+    return rolePlan[nodeId] || "UNASSIGNED";
 }
 
 function rebalanceClusterRoles() {
@@ -395,21 +409,9 @@ function rebalanceClusterRoles() {
 
     state.aggregatorId = aggregator ? aggregator.id : null;
 
+    const rolePlan = buildRolePlan(candidates, state.aggregatorId);
     for (const node of candidates) {
-        state.nodes[node.id].role = "MAPPER";
-    }
-
-    if (state.aggregatorId) {
-        state.nodes[state.aggregatorId].role = "AGGREGATOR";
-    }
-
-    const validatorCandidates = candidates
-        .filter(node => node.id !== state.aggregatorId)
-        .sort((a, b) => a.port - b.port)
-        .slice(0, 2);
-
-    for (const node of validatorCandidates) {
-        state.nodes[node.id].role = "VALIDATOR";
+        state.nodes[node.id].role = rolePlan[node.id] || "UNASSIGNED";
     }
 
     if (state.nodes[state.selfId]) {
@@ -417,9 +419,39 @@ function rebalanceClusterRoles() {
     }
 }
 
+function buildRolePlan(candidates, aggregatorId) {
+    const sortedCandidates = [...candidates].sort((a, b) => a.port - b.port);
+    const rolePlan = {};
+
+    if (aggregatorId && sortedCandidates.find(node => node.id === aggregatorId)) {
+        rolePlan[aggregatorId] = "AGGREGATOR";
+    }
+
+    const aliveRoles = aggregatorId ? ["AGGREGATOR"] : [];
+    const workers = sortedCandidates.filter(node => node.id !== aggregatorId);
+
+    for (const node of workers) {
+        const nextRole = chooseWorkerRole(aliveRoles);
+        rolePlan[node.id] = nextRole;
+        aliveRoles.push(nextRole);
+    }
+
+    return rolePlan;
+}
+
+function chooseWorkerRole(aliveRoles) {
+    const validatorCount = aliveRoles.filter(role => role === "VALIDATOR").length;
+    const mapperCount = aliveRoles.filter(role => role === "MAPPER").length;
+
+    if (validatorCount < 2) return "VALIDATOR";
+    if (mapperCount < 1) return "MAPPER";
+    if (mapperCount <= validatorCount) return "MAPPER";
+    return "VALIDATOR";
+}
+
 function chooseAggregatorCandidate(nodes) {
-    const preferred = nodes.find(node => node.role === "VALIDATOR") || nodes[0];
-    return preferred;
+    if (nodes.length === 0) return null;
+    return [...nodes].sort((a, b) => a.port - b.port)[0];
 }
 
 function reassignAggregator() {
@@ -446,6 +478,10 @@ async function startJob(req, res) {
     const validators = getNodesByRole("VALIDATOR");
     const aggregator = getAggregator();
 
+    if (!aggregator) {
+        return res.status(400).send("No aggregator node available");
+    }
+
     if (mappers.length === 0) {
         return res.status(400).send("No mapper nodes available");
     }
@@ -454,9 +490,6 @@ async function startJob(req, res) {
         return res.status(400).send("At least two validator nodes are required");
     }
 
-    if (!aggregator) {
-        return res.status(400).send("No aggregator node available");
-    }
 
     const file = fs.readFileSync(state.filePath, "utf-8");
     const lines = file.split(/\r?\n/).filter(Boolean);
@@ -469,6 +502,7 @@ async function startJob(req, res) {
     const dispatches = [];
 
     mappers.forEach((mapper, mapperIndex) => {
+
         const chunk = lines.slice(index, index + chunkSize);
         const startLine = index + 1;
         const endLine = index + chunk.length;
@@ -476,12 +510,14 @@ async function startJob(req, res) {
 
         const assignedValidators = chooseValidatorsForMapper(validators, mapperIndex);
 
+        console.log(`Dispatching ${jobId}-chunk-${mapperIndex + 1} to mapper ${mapper.port} with validators:`, assignedValidators.map(node => node.port));
+
         dispatches.push(proxy.send(buildUrl(mapper.port, "/map"), {
             jobId,
             chunkId: `${jobId}-chunk-${mapperIndex + 1}`,
             startLine,
             endLine,
-            chunk,
+            sourceFilePath: state.filePath,
             validators: assignedValidators.map(node => node.port),
             aggregator: aggregator.port,
         }));

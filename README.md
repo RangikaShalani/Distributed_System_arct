@@ -3,3 +3,20 @@ The objective of this repository is to demonstrate the knowledge and the   exper
 
 
 update first commit
+
+# run (in coordinator node)
+node app.js 8000 
+node app.js 8001
+node app.js 8002
+...
+
+
+
+
+
+
+
+
+
+
+
