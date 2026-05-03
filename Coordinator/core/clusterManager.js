@@ -469,8 +469,14 @@ function reassignAggregator() {
 }
 
 async function startJob(req, res) {
-    if (!isLeader()) return res.status(403).send("Not coordinator");
-    if (!state.filePath) return res.status(400).send("No file provided");
+    if (!isLeader()) {
+        console.log("Received job start request but not leader. Rejecting.");
+        return res.status(403).send("Not coordinator");
+    }
+    if (!state.filePath) {
+        console.log("Received job start request but no file provided. Rejecting.");
+        return res.status(400).send("No file provided");
+    }
 
     rebalanceClusterRoles();
 
@@ -479,15 +485,21 @@ async function startJob(req, res) {
     const aggregator = getAggregator();
 
     if (!aggregator) {
-        return res.status(400).send("No aggregator node available");
-    }
-
-    if (mappers.length === 0) {
-        return res.status(400).send("No mapper nodes available");
+        console.log("Received job start request but no aggregator node available. Rejecting.");
+        console.log("Available nodes:", getAliveNodes().map(node => `${node.port}(${node.role})`));
+        return res.status(400).send("No aggregator node available. Please ensure at least minimal cluster setup is available.");
     }
 
     if (validators.length < 2) {
-        return res.status(400).send("At least two validator nodes are required");
+        console.log("Received job start request but not enough validator nodes available. Rejecting.");
+        console.log("Available nodes:", getAliveNodes().map(node => `${node.port}(${node.role})`));
+        return res.status(400).send("At least two validator nodes and one mapper are required. Please ensure at least minimal cluster setup is available.");
+    }
+
+    if (mappers.length === 0) {
+        console.log("Received job start request but no mapper nodes available. Rejecting.");
+        console.log("Available nodes:", getAliveNodes().map(node => `${node.port}(${node.role})`));
+        return res.status(400).send("No mapper nodes available. Please ensure at least minimal cluster setup is available.");
     }
 
 
