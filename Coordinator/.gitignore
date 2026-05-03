@@ -2,3 +2,7 @@
 ./node_modules
 
 node_modules
+
+sidecar_logs
+
+./sidecar_logs

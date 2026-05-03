@@ -1,11 +1,15 @@
 const express = require("express");
 const cluster = require("./core/clusterManager");
 const heartbeat = require("./core/heartbeat");
+const { initNodeLogger, requestResponseLogger } = require("./utils/logger");
 
 const app = express();
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "50mb" }));
 
 const PORT = process.argv[2] || 8000;
+
+initNodeLogger(PORT);
+app.use(requestResponseLogger);
 
 cluster.init(PORT);
 
