@@ -81,6 +81,10 @@ function initNodeLogger(port) {
 }
 
 function requestResponseLogger(req, res, next) {
+    if (req.originalUrl === "/heartbeat") {
+        return next();
+    }
+
     const start = Date.now();
     let responseLogged = false;
     console.log(`[Inbound Request] ${req.method} ${req.originalUrl} body=${serializeForLog(req.body)}`);

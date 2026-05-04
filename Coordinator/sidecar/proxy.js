@@ -7,12 +7,12 @@ async function send(url, data) {
 
     try {
         const res = await axios.post(url, data, { timeout: 3000 });
-        console.log(`[Proxy Response] ${url} status=${res.status} durationMs=${Date.now() - start} body=${serializeForLog(res.data)}`);
+        // console.log(`[Proxy Response] ${url} status=${res.status} durationMs=${Date.now() - start} body=${serializeForLog(res.data)}`);
         return res.data;
     } catch (err) {
         console.log(`[Proxy Retry] ${url} reason=${err.message}`);
         const retry = await axios.post(url, data, { timeout: 3000 });
-        console.log(`[Proxy Response] ${url} status=${retry.status} durationMs=${Date.now() - start} body=${serializeForLog(retry.data)}`);
+        // console.log(`[Proxy Response] ${url} status=${retry.status} durationMs=${Date.now() - start} body=${serializeForLog(retry.data)}`);
         return retry.data;
     }
 }
