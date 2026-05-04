@@ -3,6 +3,7 @@ const path = require("path");
 const util = require("util");
 
 let initializedPort = null;
+let activeLogWriter = null;
 const MAX_LOG_VALUE_LENGTH = 4000;
 
 function serializeForLog(value) {
@@ -46,6 +47,8 @@ function initNodeLogger(port) {
         stream.write(`[${timestamp}] [${level}] ${message}\n`);
     };
 
+    activeLogWriter = writeLog;
+
     console.log = (...args) => {
         writeLog("LOG", args);
         originalConsole.log(...args);
@@ -80,6 +83,15 @@ function initNodeLogger(port) {
     console.log(`Sidecar log file initialized at ${logFilePath}`);
 }
 
+function logToFileOnly(level, ...args) {
+    if (typeof activeLogWriter === "function") {
+        activeLogWriter(level, args);
+        return;
+    }
+
+    console[level === "ERROR" ? "error" : "log"](...args);
+}
+
 function requestResponseLogger(req, res, next) {
     if (req.originalUrl === "/heartbeat") {
         return next();
@@ -87,7 +99,7 @@ function requestResponseLogger(req, res, next) {
 
     const start = Date.now();
     let responseLogged = false;
-    console.log(`[Inbound Request] ${req.method} ${req.originalUrl} body=${serializeForLog(req.body)}`);
+    logToFileOnly("LOG", `[Inbound Request] ${req.method} ${req.originalUrl} body=${serializeForLog(req.body)}`);
 
     const originalJson = res.json.bind(res);
     const originalSend = res.send.bind(res);
@@ -97,7 +109,8 @@ function requestResponseLogger(req, res, next) {
         }
 
         responseLogged = true;
-        console.log(
+        logToFileOnly(
+            "LOG",
             `[Outbound Response] ${req.method} ${req.originalUrl} status=${res.statusCode} durationMs=${Date.now() - start} body=${serializeForLog(body)}`
         );
     };
@@ -117,6 +130,7 @@ function requestResponseLogger(req, res, next) {
 
 module.exports = {
     initNodeLogger,
+    logToFileOnly,
     requestResponseLogger,
     serializeForLog,
 };
