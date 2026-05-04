@@ -64,6 +64,8 @@ module.exports = async (req, res) => {
         });
     }
 
+
+
     console.log(`Chunk ${chunkId} rejected by quorum (${accepted}/${validators.length}).`);
 
     res.status(409).json({

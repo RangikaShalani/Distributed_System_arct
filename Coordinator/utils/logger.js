@@ -5,6 +5,7 @@ const util = require("util");
 let initializedPort = null;
 let activeLogWriter = null;
 const MAX_LOG_VALUE_LENGTH = 4000;
+let requestCounter = 0;
 
 function serializeForLog(value) {
     if (value === undefined) {
@@ -83,6 +84,15 @@ function initNodeLogger(port) {
     console.log(`Sidecar log file initialized at ${logFilePath}`);
 }
 
+function createRequestId(portHint = initializedPort || "node") {
+    requestCounter += 1;
+    return `${portHint}-${Date.now()}-${requestCounter}`;
+}
+
+function getRequestIdFromHeaders(headers = {}) {
+    return headers["x-request-id"] || headers["X-Request-Id"] || null;
+}
+
 function logToFileOnly(level, ...args) {
     if (typeof activeLogWriter === "function") {
         activeLogWriter(level, args);
@@ -93,13 +103,17 @@ function logToFileOnly(level, ...args) {
 }
 
 function requestResponseLogger(req, res, next) {
-    if (req.originalUrl === "/heartbeat") {
-        return next();
-    }
-
     const start = Date.now();
     let responseLogged = false;
-    logToFileOnly("LOG", `[Inbound Request] ${req.method} ${req.originalUrl} body=${serializeForLog(req.body)}`);
+    const requestId = getRequestIdFromHeaders(req.headers) || createRequestId();
+    req.requestId = requestId;
+    req.requestReceivedAt = new Date().toISOString();
+    res.setHeader("x-request-id", requestId);
+
+    logToFileOnly(
+        "LOG",
+        `[Inbound Request] ts=${req.requestReceivedAt} requestId=${requestId} method=${req.method} path=${req.originalUrl}`
+    );
 
     const originalJson = res.json.bind(res);
     const originalSend = res.send.bind(res);
@@ -111,7 +125,7 @@ function requestResponseLogger(req, res, next) {
         responseLogged = true;
         logToFileOnly(
             "LOG",
-            `[Outbound Response] ${req.method} ${req.originalUrl} status=${res.statusCode} durationMs=${Date.now() - start} body=${serializeForLog(body)}`
+            `[Outbound Response] ts=${new Date().toISOString()} requestId=${requestId} method=${req.method} path=${req.originalUrl} status=${res.statusCode} durationMs=${Date.now() - start}`
         );
     };
 
@@ -129,6 +143,8 @@ function requestResponseLogger(req, res, next) {
 }
 
 module.exports = {
+    createRequestId,
+    getRequestIdFromHeaders,
     initNodeLogger,
     logToFileOnly,
     requestResponseLogger,

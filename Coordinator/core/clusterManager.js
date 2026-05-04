@@ -1,11 +1,11 @@
 const fs = require("fs");
 const readline = require("readline");
-const axios = require("axios");
 const proxy = require("../sidecar/proxy");
 
-const DEFAULT_PORT_RANGE = { start: 8000, end: 8080 };
+const DEFAULT_PORT_RANGE = { start: 8000, end: 8020 };
 const HOST = "localhost";
 const CLUSTER_SYNC_DELAY_MS = 200;
+const COORDINATOR_ANNOUNCE_WAIT_MS = 1800;
 
 const state = {
     selfPort: null,
@@ -21,6 +21,18 @@ const state = {
     lastLeaderHeartbeat: 0,
 };
 let pendingFilePrompt = null;
+
+function setLeader(leaderId, options = {}) {
+    const previousLeaderId = state.leaderId;
+    state.leaderId = leaderId || null;
+
+    if (!state.leaderId || previousLeaderId === state.leaderId) {
+        return;
+    }
+
+    const leaderPort = nodeIdToPort(state.leaderId);
+    console.log(`${leaderPort} is the leader`);
+}
 
 function init(port) {
     state.selfPort = Number(port);
@@ -56,9 +68,8 @@ async function bootstrapCluster() {
         return;
     }
 
-    const higherPeers = snapshots.filter(peer => peer.port > state.selfPort);
-    if (higherPeers.length > 0) {
-        applySnapshot(higherPeers[0].snapshot);
+    if (snapshots.length > 0) {
+        applySnapshot(snapshots[0].snapshot);
         await startElection("bootstrap-no-leader");
         return;
     }
@@ -73,8 +84,8 @@ async function discoverPeers() {
         if (port === state.selfPort) continue;
 
         try {
-            const res = await axios.get(buildUrl(port, "/cluster/status"), { timeout: 800 });
-            peers.push({ port, snapshot: res.data });
+            const snapshot = await proxy.get(buildUrl(port, "/cluster/status"), { timeout: 800 });
+            peers.push({ port, snapshot });
         } catch {
             // Peer not reachable yet.
         }
@@ -84,7 +95,7 @@ async function discoverPeers() {
 }
 
 async function joinLeader(leaderPort) {
-    const res = await proxy.send(buildUrl(leaderPort, "/cluster/join"), {
+    const res = await proxy.post(buildUrl(leaderPort, "/cluster/join"), {
         port: state.selfPort,
         nodeId: state.selfId,
     });
@@ -152,7 +163,7 @@ function syncCluster(req, res) {
 function electionHandler(req, res) {
     const { candidateId, term } = req.body;
     const candidatePort = nodeIdToPort(candidateId);
-    const shouldTakeOver = state.selfPort > candidatePort;
+    const shouldReplyOk = state.selfPort > candidatePort;
 
     ensureNodeRecord(candidatePort, {
         role: state.nodes[candidateId]?.role || "UNASSIGNED",
@@ -164,13 +175,17 @@ function electionHandler(req, res) {
         state.electionTerm = term;
     }
 
+    if (!shouldReplyOk) {
+        return res.status(204).end();
+    }
+
     res.json({
         ok: true,
         responderId: state.selfId,
-        willRunElection: shouldTakeOver,
+        willRunElection: true,
     });
 
-    if (shouldTakeOver && !state.electionInProgress) {
+    if (!state.electionInProgress) {
         setTimeout(() => {
             startElection("received-election").catch(err => {
                 console.log("Election retry failed:", err.message);
@@ -182,6 +197,7 @@ function electionHandler(req, res) {
 function coordinatorHandler(req, res) {
     const snapshot = req.body;
     applySnapshot(snapshot);
+    state.electionInProgress = false;
     res.json({
         ok: true,
         leaderId: state.leaderId,
@@ -193,21 +209,24 @@ async function startElection(reason = "leader-failed") {
 
     state.electionInProgress = true;
     state.electionTerm += 1;
+    state.leaderId = null;
     console.log(`Election started (${reason}) term=${state.electionTerm}`);
 
-    const higherNodes = getAliveNodes()
-        .filter(node => node.port > state.selfPort);
+    const peers = getAliveNodes()
+        .filter(node => node.id !== state.selfId);
 
     let receivedAck = false;
 
-    for (const node of higherNodes) {
+    for (const node of peers) {
         try {
-            const res = await axios.post(buildUrl(node.port, "/cluster/election"), {
+            console.log(`Sending election message to ${node.port} (term ${state.electionTerm})`);
+            const res = await proxy.post(buildUrl(node.port, "/cluster/election"), {
                 candidateId: state.selfId,
                 term: state.electionTerm,
-            }, { timeout: 1000 });
+            }, { timeout: 1000, retries: 0 });
 
-            if (res.data && res.data.ok) {
+            if (res?.ok && res?.willRunElection) {
+                console.log(`Received OK from higher node ${node.port}`);
                 receivedAck = true;
             }
         } catch {
@@ -231,13 +250,14 @@ async function startElection(reason = "leader-failed") {
         }
 
         state.electionInProgress = false;
-    }, 1800);
+    }, COORDINATOR_ANNOUNCE_WAIT_MS);
 }
 
 function becomeLeader(reason = "promotion") {
-    state.leaderId = state.selfId;
+    setLeader(state.selfId, { source: reason });
     state.role = "COORDINATOR";
     state.electionTerm += 1;
+    state.electionInProgress = false;
     state.lastLeaderHeartbeat = Date.now();
 
     ensureNodeRecord(state.selfPort, {
@@ -249,35 +269,41 @@ function becomeLeader(reason = "promotion") {
     rebalanceClusterRoles();
     bumpVersion();
 
-    console.log(`Node ${state.selfPort} became leader (${reason})`);
-    announceCoordinator();
-    broadcastClusterConfig();
+    console.log(`I am the new leader (${reason})`);
+    announceCoordinator().catch(err => {
+        console.log("Coordinator announcement failed:", err.message);
+    });
+    broadcastClusterConfig().catch(err => {
+        console.log("Cluster config broadcast failed:", err.message);
+    });
 }
 
-function announceCoordinator() {
+async function announceCoordinator() {
     const snapshot = buildSnapshot();
+    const peers = getAliveNodes().filter(node => node.id !== state.selfId);
 
-    for (const node of getAliveNodes()) {
-        if (node.id === state.selfId) continue;
-
-        axios.post(buildUrl(node.port, "/cluster/coordinator"), snapshot, { timeout: 1000 })
-            .catch(() => {
-                markNodeDead(node.id, "announce-failed");
-            });
-    }
+    await Promise.allSettled(
+        peers.map(node =>
+            proxy.post(buildUrl(node.port, "/cluster/coordinator"), snapshot, { timeout: 1000, retries: 0 })
+                .catch(() => {
+                    markNodeDead(node.id, "announce-failed");
+                })
+        )
+    );
 }
 
-function broadcastClusterConfig() {
+async function broadcastClusterConfig() {
     const snapshot = buildSnapshot();
+    const peers = getAliveNodes().filter(node => node.id !== state.selfId);
 
-    for (const node of getAliveNodes()) {
-        if (node.id === state.selfId) continue;
-
-        axios.post(buildUrl(node.port, "/cluster/sync"), snapshot, { timeout: 1000 })
-            .catch(() => {
-                markNodeDead(node.id, "sync-failed");
-            });
-    }
+    await Promise.allSettled(
+        peers.map(node =>
+            proxy.post(buildUrl(node.port, "/cluster/sync"), snapshot, { timeout: 1000, retries: 0 })
+                .catch(() => {
+                    markNodeDead(node.id, "sync-failed");
+                })
+        )
+    );
 }
 
 function heartbeatAck(req, res) {
@@ -301,7 +327,7 @@ function heartbeatAck(req, res) {
 function handleLeaderHeartbeat(leaderId) {
     state.lastLeaderHeartbeat = Date.now();
     if (leaderId) {
-        state.leaderId = leaderId;
+        setLeader(leaderId, { source: "heartbeat" });
     }
 }
 
@@ -323,7 +349,7 @@ function monitorNodeHealth(report = {}) {
     });
 
     if (leaderId) {
-        state.leaderId = leaderId;
+        setLeader(leaderId, { source: "health-report" });
     }
 }
 
@@ -529,7 +555,7 @@ async function startJob(req, res) {
 
         console.log(`Dispatching ${jobId}-chunk-${mapperIndex + 1} to mapper ${mapper.port} with validators:`, assignedValidators.map(node => node.port));
 
-        dispatches.push(proxy.send(buildUrl(mapper.port, "/map"), {
+        dispatches.push(proxy.post(buildUrl(mapper.port, "/map"), {
             jobId,
             chunkId: `${jobId}-chunk-${mapperIndex + 1}`,
             startLine,
@@ -628,7 +654,7 @@ function applySnapshot(snapshot = {}) {
     if (!isNewer) return;
 
     state.nodes = snapshot.nodes;
-    state.leaderId = snapshot.leaderId || state.leaderId;
+    setLeader(snapshot.leaderId || state.leaderId, { source: "snapshot-sync" });
     state.aggregatorId = snapshot.aggregatorId || null;
     state.electionTerm = snapshot.electionTerm || state.electionTerm;
     state.version = snapshot.version || state.version;

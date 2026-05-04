@@ -2,6 +2,7 @@ const express = require("express");
 const cluster = require("./core/clusterManager");
 const heartbeat = require("./core/heartbeat");
 const { initNodeLogger, requestResponseLogger } = require("./utils/logger");
+const sidecar = require("./sidecar/proxy");
 
 const app = express();
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "50mb" }));
@@ -25,6 +26,9 @@ app.post("/cluster/election", cluster.electionHandler);
 app.post("/cluster/coordinator", cluster.coordinatorHandler);
 app.get("/heartbeat", cluster.heartbeatAck);
 app.get("/start", cluster.startJob);
+app.get("/sidecar/metrics", (req, res) => {
+    res.json(sidecar.getMetrics());
+});
 
 app.post("/map", require("./roles/mapper"));
 app.post("/validate", require("./roles/validator"));

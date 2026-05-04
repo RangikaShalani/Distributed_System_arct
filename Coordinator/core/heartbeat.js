@@ -1,5 +1,5 @@
-const axios = require("axios");
 const cluster = require("./clusterManager");
+const proxy = require("../sidecar/proxy");
 
 const HEARTBEAT_INTERVAL_MS = 3000;
 const LEADER_TIMEOUT_MS = 7000;
@@ -15,8 +15,8 @@ function start() {
                 if (node.id === self.id) continue;
 
                 try {
-                    const res = await axios.get(`http://localhost:${node.port}/heartbeat`, { timeout: 1000 });
-                    cluster.monitorNodeHealth(res.data);
+                    const res = await proxy.get(`http://localhost:${node.port}/heartbeat`, { timeout: 1000, retries: 0 });
+                    cluster.monitorNodeHealth(res);
                 } catch {
                     cluster.markNodeDead(node.id, "heartbeat-timeout");
                 }
@@ -34,9 +34,9 @@ function start() {
         const leaderPort = Number(String(leaderId).split(":")[1]);
 
         try {
-            const res = await axios.get(`http://localhost:${leaderPort}/heartbeat`, { timeout: 1000 });
-            cluster.handleLeaderHeartbeat(res.data.leaderId);
-            cluster.monitorNodeHealth(res.data);
+            const res = await proxy.get(`http://localhost:${leaderPort}/heartbeat`, { timeout: 1000, retries: 0 });
+            cluster.handleLeaderHeartbeat(res.leaderId);
+            cluster.monitorNodeHealth(res);
         } catch {
             cluster.handleLeaderFailure();
         }
