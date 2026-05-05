@@ -2,6 +2,50 @@ const proxy = require("../sidecar/proxy");
 const summarizeChunk = require("../utils/summarizer");
 const readChunk = require("../utils/chunkReader");
 
+function uniquePorts(ports = []) {
+    return Array.from(new Set(ports.map(port => Number(port)).filter(Number.isFinite)));
+}
+
+async function validateWithPorts({
+    ports,
+    jobId,
+    chunkId,
+    sourceFilePath,
+    mapperResult,
+    startLine,
+    endLine,
+    aggregator,
+    expectedValidatorCount,
+}) {
+    const requests = ports.map(port =>
+        proxy.post(`http://localhost:${port}/validate`, {
+            jobId,
+            chunkId,
+            sourceFilePath,
+            mapperResult,
+            startLine,
+            endLine,
+            aggregator,
+            expectedValidatorCount,
+        })
+    );
+
+    const settled = await Promise.allSettled(requests);
+
+    return settled.map((item, index) => {
+        if (item.status === "fulfilled") {
+            return item.value;
+        }
+
+        return {
+            status: "validator-call-failed",
+            validatorPort: ports[index],
+            accepted: false,
+            error: item.reason?.message || "Validator call failed",
+        };
+    });
+}
+
 module.exports = async (req, res) => {
     const {
         chunk,
@@ -9,70 +53,86 @@ module.exports = async (req, res) => {
         chunkId,
         startLine,
         endLine,
-        validators,
+        validators = [],
+        allValidatorList = [],
         aggregator,
         sourceFilePath,
     } = req.body;
     const materializedChunk = readChunk({ chunk, sourceFilePath, startLine, endLine });
+    const requiredAcceptedCount = Math.max(1, uniquePorts(validators).length);
+    const availableValidators = uniquePorts(allValidatorList.length > 0 ? allValidatorList : validators);
+    const attemptedValidators = new Set();
+    const acceptedValidators = new Set();
+    const validatorResponses = [];
 
     console.log(`Mapper processing ${chunkId} (${startLine}-${endLine})`);
 
-    const result = summarizeChunk(materializedChunk);
+    let candidatePorts = uniquePorts(validators);
 
-    console.log(`Mapper result for ${chunkId}:`, result);
+    while (acceptedValidators.size < requiredAcceptedCount && candidatePorts.length > 0) {
+        const result = summarizeChunk(materializedChunk);
+        console.log(`Mapper result for ${chunkId}:`, result);
+        console.log(`Sending ${chunkId} to validators:`, candidatePorts);
 
-    console.log(`Sending validation requests for ${chunkId} to validators:`, validators);
+        for (const port of candidatePorts) {
+            attemptedValidators.add(port);
+        }
 
-    const validatorRequests = validators.map(port =>
-        proxy.send(`http://localhost:${port}/validate`, {
+        const responses = await validateWithPorts({
+            ports: candidatePorts,
             jobId,
             chunkId,
             sourceFilePath,
             mapperResult: result,
             startLine,
             endLine,
-        })
-    );
-
-    const settled = await Promise.allSettled(validatorRequests);
-    const votes = settled
-        .filter(item => item.status === "fulfilled")
-        .map(item => item.value)
-        .filter(Boolean);
-
-    const accepted = votes.filter(vote => vote.accepted).length;
-    const quorum = Math.floor(validators.length / 2) + 1;
-
-    if (accepted >= quorum) {
-        console.log(`Chunk ${chunkId} accepted by quorum (${accepted}/${validators.length}). Sending to aggregator ${aggregator}.`);
-        await proxy.send(`http://localhost:${aggregator}/aggregate`, {
-            jobId,
-            chunkId,
-            result,
-            validation: {
-                quorum,
-                accepted,
-                validators,
-            },
+            aggregator,
+            expectedValidatorCount: requiredAcceptedCount,
         });
 
+        validatorResponses.push(...responses);
+
+        for (const response of responses) {
+            if (response?.accepted && Number.isFinite(Number(response.validatorPort))) {
+                acceptedValidators.add(Number(response.validatorPort));
+            }
+        }
+
+        if (acceptedValidators.size >= requiredAcceptedCount) {
+            break;
+        }
+
+        const remainingNeeded = requiredAcceptedCount - acceptedValidators.size;
+        candidatePorts = availableValidators
+            .filter(port => !attemptedValidators.has(port))
+            .slice(0, remainingNeeded);
+
+        if (candidatePorts.length > 0) {
+            console.log(
+                `Chunk ${chunkId} still needs ${remainingNeeded} accepted validator result(s). ` +
+                `Retrying with other validators: ${candidatePorts.join(", ")}`
+            );
+        }
+    }
+
+    if (acceptedValidators.size >= requiredAcceptedCount) {
         return res.json({
             status: "validated",
+            jobId,
             chunkId,
-            accepted,
-            quorum,
+            acceptedValidatorCount: acceptedValidators.size,
+            expectedValidatorCount: requiredAcceptedCount,
+            attemptedValidators: Array.from(attemptedValidators),
         });
     }
 
-
-
-    console.log(`Chunk ${chunkId} rejected by quorum (${accepted}/${validators.length}).`);
-
-    res.status(409).json({
+    return res.status(409).json({
         status: "rejected",
+        jobId,
         chunkId,
-        accepted,
-        quorum,
-        votes,
+        acceptedValidatorCount: acceptedValidators.size,
+        expectedValidatorCount: requiredAcceptedCount,
+        attemptedValidators: Array.from(attemptedValidators),
+        validatorResponses,
     });
 };

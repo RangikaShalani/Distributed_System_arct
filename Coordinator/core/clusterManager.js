@@ -562,6 +562,7 @@ async function startJob(req, res) {
             endLine,
             sourceFilePath: state.filePath,
             validators: assignedValidators.map(node => node.port),
+            allValidatorList: validators.map(node => node.port),
             aggregator: aggregator.port,
         }));
     });

@@ -19,7 +19,7 @@ The architectural approach is built around these ideas:
 - lightweight HTTP communication between all nodes
 - per-node sidecar communication layer for observability and resilience
 
-At a high level, the Coordinator manages cluster membership, elections, heartbeats, and job dispatch. Mappers process file slices, Validators independently verify mapper output, and the Aggregator merges only validated results.
+At a high level, the Coordinator manages cluster membership, elections, heartbeats, and job dispatch. Mappers process file slices, Validators independently verify mapper output, and the Aggregator merges chunk results only after enough validators accept them.
 
 This gives the system a simple but practical structure for distributed processing:
 
@@ -27,7 +27,7 @@ This gives the system a simple but practical structure for distributed processin
 2. assign worker roles dynamically
 3. partition the log workload
 4. validate mapper output through distributed voting
-5. aggregate only quorum-approved results
+5. aggregate only after enough accepted validator confirmations arrive
 
 ## 2. Detailed Solution Design
 
@@ -107,6 +107,8 @@ Each mapper request includes:
 
 The current implementation sends file metadata rather than the raw chunk body. Mapper and validator nodes reconstruct the exact line slice locally from the same file path.
 
+Each chunk is dispatched with at least 2 validator targets. Validators forward accepted reports to the Aggregator, while rejected results are returned to the Mapper so it can retry with other validators.
+
 ### 2.5 Processing Logic
 
 Mapper logic:
@@ -114,19 +116,23 @@ Mapper logic:
 - read its assigned slice
 - summarize severity counts
 - send validation requests to assigned validators
-- wait for votes using `Promise.allSettled`
-- forward result to Aggregator only if quorum is reached
+- track accepted validators and attempted validators
+- retry rejected chunks with other unused validators
+- return success only after enough validators accept
 
 Validator logic:
 
 - rebuild the same chunk locally
 - recompute the summary
 - compare recomputed result with mapper result
-- return `MATCH` or `MISMATCH`
+- send an accepted validation report to the Aggregator on `MATCH`
+- return a rejection response to the Mapper on `MISMATCH`
 
 Aggregator logic:
 
-- track processed chunk IDs to prevent duplicates
+- collect accepted validator reports by `chunkId`
+- wait until the expected accepted validator count is reached for that chunk
+- ignore duplicate validator reports and duplicate finalized chunks
 - merge accepted totals into per-job aggregates
 - keep a running final output for each job
 
@@ -266,9 +272,10 @@ Each validator:
 
 1. recomputes the result independently
 2. compares with mapper output
-3. returns a vote
+3. if accepted, forwards a validation report to the Aggregator
+4. if rejected, returns the rejection to the Mapper
 
-Quorum rule:
+Acceptance rule:
 
 ```text
 floor(numberOfValidators / 2) + 1
@@ -276,19 +283,20 @@ floor(numberOfValidators / 2) + 1
 
 With 2 validators, both must accept.
 
-This protects the Aggregator from accepting a faulty mapper result without independent confirmation.
+If one validator rejects, the Mapper recalculates the result and retries the chunk on other unused validators until it either gathers enough accepted validators or runs out of validator candidates.
 
 ### 4.4 Aggregation Algorithm
 
-Only quorum-approved chunk results are sent to the Aggregator.
+Only accepted validator reports are sent to the Aggregator for each chunk.
 
 For each chunk:
 
-1. ignore duplicate `chunkId`
-2. merge severity counts into job totals
-3. update running result
+1. collect accepted reports by `chunkId`
+2. ignore duplicate reports from the same validator
+3. wait for the required accepted validator count
+4. merge mapper severity counts into job totals when enough accepted reports arrive
 
-This makes aggregation idempotent at chunk level and avoids double counting from retries or duplicates.
+This makes aggregation idempotent at chunk level and avoids double counting from retries, duplicate validator reports, or late deliveries.
 
 ## 5. Sequence Diagrams Of Communication Flow
 
@@ -324,11 +332,12 @@ Coordinator -> Terminal: prompt for file path
 Coordinator -> Mapper: POST /map
 Mapper -> Validator A: POST /validate
 Mapper -> Validator B: POST /validate
-Validator A -> Mapper: accept/reject
-Validator B -> Mapper: accept/reject
-Mapper -> Mapper: quorum decision
-Mapper -> Aggregator: POST /aggregate
-Aggregator -> Mapper: aggregated response
+Validator A -> Aggregator: accepted validation report
+Validator B -> Mapper: rejected response
+Mapper -> Validator C: retry same chunk on other validator
+Validator C -> Aggregator: accepted validation report
+Aggregator -> Aggregator: wait for required accepted reports for same chunkId
+Aggregator -> Aggregator: duplicate filtering + merge accepted chunk into final totals
 Mapper -> Coordinator: validated/rejected response
 ```
 
@@ -431,12 +440,14 @@ Result:
 
 Scenario:
 
-- a mapper or retry sends the same chunk twice
+- a validator or mapper delivery is duplicated
 
 Strategy:
 
 - Aggregator stores `processedChunks`
-- duplicate `chunkId` is ignored
+- duplicate validator reports from the same validator are ignored
+- duplicate finalized chunks are ignored
+- Mapper avoids retrying the same validator twice for one chunk
 
 Result:
 
@@ -499,7 +510,7 @@ Whenever a node observes a leader change through self-promotion, heartbeat, or s
 
 ### 8.3 Processing Consistency
 
-Chunk results are not aggregated immediately after mapping. They are aggregated only after quorum validation.
+Chunk results are not aggregated immediately after mapping. They are aggregated only after the Mapper gathers enough accepted validators and the Aggregator receives those accepted validation reports.
 
 This gives:
 
@@ -509,7 +520,7 @@ This gives:
 
 ### 8.4 Aggregation Consistency
 
-The Aggregator uses `processedChunks` to ensure at-most-once merge behavior per `chunkId`.
+The Aggregator uses `processedChunks` plus per-chunk accepted-validator report tracking to ensure at-most-once merge behavior per `chunkId`.
 
 This gives chunk-level idempotency for aggregation.
 

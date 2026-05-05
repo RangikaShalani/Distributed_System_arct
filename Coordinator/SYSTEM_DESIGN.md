@@ -32,13 +32,13 @@ Each node also writes its runtime logs to a per-port file under `sidecar_logs/`.
   Runs periodic health checks between the Coordinator and followers.
 
 - `roles/mapper.js`
-  Reads the assigned log slice, summarizes it, requests validator confirmation, and forwards accepted results to the Aggregator.
+  Reads the assigned log slice, summarizes it, sends it to validators, and retries with other validators when a validator rejects the result.
 
 - `roles/validator.js`
-  Recomputes the mapper slice summary and returns an accept or reject vote.
+  Recomputes the mapper slice summary, forwards accepted results to the Aggregator, and returns rejected results back to the Mapper.
 
 - `roles/aggregator.js`
-  Merges validated mapper outputs into the final per-job totals.
+  Collects accepted validator reports per chunk, ignores duplicates, and merges the mapper result after enough accepted validator confirmations arrive.
 
 - `sidecar/proxy.js`
   Wraps outbound `POST` requests with sidecar-style logging and a single retry on failure.
@@ -278,7 +278,10 @@ Each mapper receives metadata for one contiguous line range:
 - `endLine`
 - `sourceFilePath`
 - `validators`
+- `allValidatorList`
 - `aggregator`
+
+The Coordinator currently dispatches each chunk with at least 2 validator targets.
 
 The Coordinator currently sends `sourceFilePath` and line boundaries instead of sending the entire chunk body. This means workers reconstruct their chunk locally from the same shared file path.
 
@@ -335,44 +338,44 @@ Mapper summaries currently contain counts only:
 
 The older unique-message collection logic is no longer active in `summarizer.js`.
 
-### Validation fan-out
+### Validation dispatch
 
-The mapper sends validation requests concurrently with `Promise.allSettled()` so one validator failure does not prevent collecting other responses.
+The mapper sends validation requests concurrently with `Promise.allSettled()` to the currently selected validator set.
 
-### Quorum rule
+The mapper keeps track of:
 
-Quorum is computed as:
+- the required accepted validator count
+- which validators were already attempted
+- which validators already accepted
 
-```text
-floor(numberOfValidators / 2) + 1
-```
+If a validator rejects the mapper result, the mapper recalculates the chunk result and retries the same chunk on other unused validators from `allValidatorList`.
 
-With the current normal 2-validator assignment, both validators must accept.
+### Mapper response
 
-### Success path
-
-If quorum is reached:
-
-1. The mapper logs the quorum result.
-2. It sends the accepted summary to `POST /aggregate`.
-3. It returns:
+If the mapper gathers enough accepted validator responses, it returns a response like:
 
 ```json
 {
   "status": "validated",
+  "jobId": "...",
   "chunkId": "...",
-  "accepted": 2,
-  "quorum": 2
+  "acceptedValidatorCount": 2,
+  "expectedValidatorCount": 2,
+  "attemptedValidators": [8003, 8004]
 }
 ```
 
-### Failure path
+If it runs out of validator candidates before reaching the required accepted count, it returns HTTP `409` with a response like:
 
-If quorum is not reached:
-
-1. The mapper does not contact the Aggregator.
-2. It returns HTTP `409`.
-3. The response includes the collected validator votes.
+```json
+{
+  "status": "rejected",
+  "jobId": "...",
+  "chunkId": "...",
+  "acceptedValidatorCount": 1,
+  "expectedValidatorCount": 2
+}
+```
 
 ## 10. Validator Logic
 
@@ -382,15 +385,21 @@ It then:
 
 1. recomputes the chunk summary
 2. compares it with the mapper result using `JSON.stringify(...)`
-3. returns a vote with `accepted: true` when the summaries match exactly
+3. if the summaries match, forwards an accepted validation report to the Aggregator
+4. if the summaries do not match, returns a rejection response to the Mapper
 
-Validator response format:
+Validator-to-Aggregator report format:
 
 ```json
 {
+  "kind": "validation-report",
   "jobId": "...",
   "chunkId": "...",
+  "validatorPort": 8003,
   "accepted": true,
+  "mapperResult": { "ERROR": { "count": 12 } },
+  "recomputedResult": { "ERROR": { "count": 12 } },
+  "expectedValidatorCount": 2,
   "validatorAt": 1777895692874,
   "reason": "MATCH"
 }
@@ -401,6 +410,19 @@ Possible `reason` values:
 - `MATCH`
 - `MISMATCH`
 
+If validation is rejected, the validator returns a mapper-facing response like:
+
+```json
+{
+  "status": "rejected",
+  "jobId": "...",
+  "chunkId": "...",
+  "validatorPort": 8003,
+  "accepted": false,
+  "reason": "MISMATCH"
+}
+```
+
 ## 11. Aggregation Logic
 
 The Aggregator stores in-memory state per `jobId`.
@@ -410,14 +432,29 @@ For each job it keeps:
 - `processedChunks`
 - `totals`
 - `uniqueMessages`
+- `validationReports`
 
 ### Duplicate handling
 
-If the same `chunkId` arrives more than once, the Aggregator returns `"Duplicate"` and does not merge it again.
+The Aggregator ignores:
+
+- duplicate reports from the same validator for the same `chunkId`
+- late validator reports for a chunk that was already finalized
+- duplicate finalized chunks that have already been merged
+
+### Consensus behavior
+
+For each `chunkId`, the Aggregator:
+
+1. groups incoming accepted validator reports by `chunkId`
+2. waits until it has received the required `expectedValidatorCount`
+3. finalizes the chunk when enough accepted validator reports arrive
+
+With the current normal 2-validator assignment, the Aggregator waits for 2 accepted validator reports for the same `chunkId`.
 
 ### Merge behavior
 
-For each severity in the mapper result:
+After enough accepted validator reports are collected, the Aggregator merges the original mapper result for that chunk:
 
 1. initialize the severity bucket if missing
 2. add `summary.count` into `totals[severity]`
@@ -436,7 +473,7 @@ After each accepted chunk merge, the Aggregator logs and returns an output array
 ]
 ```
 
-There is no explicit job-complete signal yet. The Aggregator simply updates and logs the running final result whenever a validated chunk arrives.
+There is no explicit job-complete signal yet. The Aggregator simply updates and logs the running final result whenever enough accepted validator reports arrive for a chunk.
 
 ## 12. Communication Model
 
@@ -521,6 +558,7 @@ Unhandled exceptions and unhandled promise rejections are also written to the no
 5. The operator calls `GET /start` on the Coordinator.
 6. The Coordinator asks for a local log file path in the terminal.
 7. The Coordinator splits that file into line ranges and dispatches mapper jobs.
-8. Each mapper rebuilds its chunk, summarizes it, and asks validators to verify it.
-9. If quorum is reached, the mapper forwards the summary to the Aggregator.
-10. The Aggregator merges accepted chunk totals and logs the running final result.
+8. Each mapper rebuilds its chunk, summarizes it, and dispatches that result to validator nodes.
+9. If a validator accepts, it sends its validation report to the Aggregator. If it rejects, it sends rejection back to the Mapper.
+10. The Mapper retries rejected chunks on other validators until enough validators accept or no validators remain.
+11. The Aggregator merges accepted chunk totals after receiving the required accepted validator reports.
