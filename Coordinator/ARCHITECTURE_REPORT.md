@@ -62,8 +62,8 @@ When a node starts:
 2. it probes peers using `GET /cluster/status`
 3. it attempts to locate a live leader
 4. if a leader exists, it joins using `POST /cluster/join`
-5. if no leader exists, it participates in a bully-style election
-6. if no stronger peer is present, it becomes Coordinator
+5. if peers exist but no live leader is known, it participates in a bully-style election
+6. if no peer responds as a higher-priority candidate, it becomes Coordinator
 
 ### 2.3 Role Assignment
 
@@ -230,10 +230,12 @@ Rule:
 Election steps:
 
 1. a candidate increments `electionTerm`
-2. it contacts all live higher-port nodes through `POST /cluster/election`
-3. if no higher node responds, it becomes Coordinator
-4. if a higher node responds, that higher node is expected to continue the election
-5. if no leader stabilizes within timeout, election is retried
+2. it clears its current `leaderId`
+3. it contacts all live peer nodes through `POST /cluster/election`
+4. a peer replies `ok: true` only when its own port is higher than the candidate port
+5. if no higher node responds, the candidate becomes Coordinator
+6. if a higher node responds, that higher node is expected to continue the election
+7. if no leader stabilizes within timeout, election is retried
 
 This makes leader selection deterministic without a central registry.
 
@@ -297,7 +299,7 @@ New Node -> Peer Nodes: GET /cluster/status
 Peer Nodes -> New Node: snapshot responses
 New Node -> Coordinator: POST /cluster/join
 Coordinator -> Coordinator: update membership + rebalance roles
-Coordinator -> All Nodes: POST /cluster/sync
+Coordinator -> All Nodes (parallel): POST /cluster/sync
 Coordinator -> New Node: join response with role + snapshot
 ```
 
@@ -306,11 +308,12 @@ Coordinator -> New Node: join response with role + snapshot
 ```text
 Follower -> Leader: GET /heartbeat
 Leader X-> Follower: no response
-Follower -> Higher Nodes: POST /cluster/election
+Follower -> All Peer Nodes: POST /cluster/election
 Higher Node -> Follower: ack / willRunElection
 Higher Node -> Higher Peers: POST /cluster/election
-Highest Live Node -> All Nodes: POST /cluster/coordinator
-Highest Live Node -> All Nodes: POST /cluster/sync
+Highest Live Node -> All Nodes (parallel): POST /cluster/coordinator
+Highest Live Node -> All Nodes (parallel): POST /cluster/sync
+All Nodes -> All Nodes: log "${port} is the leader" when leaderId changes
 ```
 
 ### 5.3 Job Execution Flow
@@ -351,8 +354,8 @@ Strategy:
 
 - trigger bully election
 - highest live node becomes new Coordinator
-- new Coordinator announces itself
-- new Coordinator rebroadcasts cluster state
+- new Coordinator announces itself to all peers in parallel
+- new Coordinator rebroadcasts cluster state to all peers in parallel
 
 Result:
 
@@ -491,6 +494,8 @@ Nodes apply only newer snapshots. This gives eventual convergence toward the lat
 At any moment during failover there may be a short transition period, but the bully election ensures the highest live priority node wins once the system stabilizes.
 
 This provides eventual single-leader consistency.
+
+Whenever a node observes a leader change through self-promotion, heartbeat, or snapshot synchronization, it logs `${port} is the leader`.
 
 ### 8.3 Processing Consistency
 

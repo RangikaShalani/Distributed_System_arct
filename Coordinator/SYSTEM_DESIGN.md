@@ -101,12 +101,12 @@ When a node starts:
    - higher port as tie-breaker
 5. It then follows one of these paths:
    - if a live leader exists, join that leader through `POST /cluster/join`
-   - if no leader exists but a higher-port peer exists, begin election
+   - if peers exist but no live leader is known, begin election
    - if no suitable peers exist, become leader immediately
 
 ### Seed port discovery
 
-Peer discovery uses `CLUSTER_PORTS` when present. If that environment variable is not set, the node scans ports `8000` through `8080`.
+Peer discovery uses `CLUSTER_PORTS` when present. If that environment variable is not set, the node scans ports `8000` through `8020`.
 
 ### Join flow
 
@@ -173,10 +173,13 @@ An election begins when:
 ### Election flow
 
 1. The candidate increments `electionTerm`.
-2. It sends `POST /cluster/election` to all live nodes with higher ports.
-3. If no higher node acknowledges, the candidate becomes the Coordinator.
-4. If any higher node acknowledges, the candidate waits for a leader to emerge.
-5. If no leader appears before timeout, the candidate retries election.
+2. It clears its current `leaderId` and sends `POST /cluster/election` to all live peer nodes.
+3. Each receiver compares the incoming `candidateId` against its own port:
+   - if receiver port is higher than the candidate port, it replies with `ok: true`
+   - if receiver port is lower than or equal to the candidate port, it does not send an election OK response
+4. If no higher node acknowledges, the candidate becomes the Coordinator.
+5. If any higher node acknowledges, the candidate waits for a leader announcement.
+6. If no leader appears before timeout, the candidate retries election.
 
 ### Becoming leader
 
@@ -187,8 +190,9 @@ When a node becomes leader:
 3. It increments `electionTerm`.
 4. It rebalances roles.
 5. It increments the cluster `version`.
-6. It announces leadership through `POST /cluster/coordinator`.
-7. It broadcasts the latest snapshot through `POST /cluster/sync`.
+6. It announces leadership through `POST /cluster/coordinator` to all peers in parallel.
+7. It broadcasts the latest snapshot through `POST /cluster/sync` to all peers in parallel.
+8. Any node that learns a new `leaderId` logs the message `${port} is the leader`.
 
 ### Aggregator failover
 
@@ -459,13 +463,13 @@ All node-to-node communication is plain HTTP on `localhost`.
 
 ### Sidecar request behavior
 
-Outbound `POST` calls made through `sidecar/proxy.js`:
+Outbound `GET` and `POST` calls made through `sidecar/proxy.js`:
 
 - log request metadata to the node log file
 - attempt the request once
 - retry once if the first attempt fails
-
-The proxy currently logs request and retry events, while proxy response logs remain commented out.
+- record success, failure, retry, and circuit-breaker metrics
+- attach or propagate `x-request-id` headers for tracing
 
 ## 13. Logging Behavior
 
@@ -493,9 +497,7 @@ The Express middleware logs:
 - inbound request method, URL, and body
 - outbound response status, duration, and body
 
-`/heartbeat` is excluded from request/response logging to keep logs smaller.
-
-These request/response trace lines now go to the log file only and are not echoed to the terminal.
+These request/response trace lines go to the log file only and are not echoed to the terminal.
 
 ### Error logging
 
