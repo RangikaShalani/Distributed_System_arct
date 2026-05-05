@@ -35,7 +35,6 @@ function mergeResult(job, result = {}) {
 
 module.exports = (req, res) => {
     const {
-        kind = "validation-report",
         jobId,
         chunkId,
         validatorPort,
@@ -45,12 +44,12 @@ module.exports = (req, res) => {
         reason,
     } = req.body;
 
-    if (kind !== "validation-report") {
-        return res.status(400).json({
-            error: "UNSUPPORTED_AGGREGATION_KIND",
-            kind,
-        });
-    }
+    // if (kind !== "validation-report") {
+    //     return res.status(400).json({
+    //         error: "UNSUPPORTED_AGGREGATION_KIND",
+    //         kind,
+    //     });
+    // }
 
     const job = getJobState(jobId);
 

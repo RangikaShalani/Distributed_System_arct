@@ -41,7 +41,6 @@ module.exports = async (req, res) => {
 
     try {
         await proxy.post(`http://localhost:${aggregator}/aggregate`, {
-            kind: "validation-report",
             jobId,
             chunkId,
             validatorPort,
