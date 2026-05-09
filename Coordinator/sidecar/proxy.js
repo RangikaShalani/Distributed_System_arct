@@ -132,7 +132,7 @@ async function send(optionsOrUrl, data, legacyOptions = {}) {
 
         logToFileOnly(
             "LOG",
-            `[Sidecar Outbound Request] ts=${new Date().toISOString()} requestId=${requestId} method=${method} url=${url} attempt=${attempt} body=${serializeForLog(options.data)}`
+            `[Sidecar Outbound Request] ts=${new Date().toISOString()} requestId=${requestId} method=${method} url=${url} attempt=${attempt}`
         );
 
         try {
@@ -152,7 +152,7 @@ async function send(optionsOrUrl, data, legacyOptions = {}) {
 
             logToFileOnly(
                 "LOG",
-                `[Sidecar Outbound Response] ts=${new Date().toISOString()} requestId=${requestId} method=${method} url=${url} status=${response.status} durationMs=${latencyMs} body=${serializeForLog(response.data)}`
+                `[Sidecar Outbound Response] ts=${new Date().toISOString()} requestId=${requestId} method=${method} url=${url} status=${response.status} durationMs=${latencyMs}`
             );
 
             return response.data;
