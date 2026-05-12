@@ -502,13 +502,6 @@ async function startJob(req, res) {
         return res.status(403).send("Not coordinator");
     }
 
-    try {
-        state.filePath = await promptForJobFilePath();
-    } catch (err) {
-        console.log("Failed to read file path from terminal:", err.message);
-        return res.status(500).send("Failed to read file path from terminal");
-    }
-
     rebalanceClusterRoles();
 
     const mappers = getNodesByRole("MAPPER");
@@ -531,6 +524,13 @@ async function startJob(req, res) {
         console.log("Received job start request but no mapper nodes available. Rejecting.");
         console.log("Available nodes:", getAliveNodes().map(node => `${node.port}(${node.role})`));
         return res.status(400).send("No mapper nodes available. Please ensure at least minimal cluster setup is available.");
+    }
+
+    try {
+        state.filePath = await promptForJobFilePath();
+    } catch (err) {
+        console.log("Failed to read file path from terminal:", err.message);
+        return res.status(500).send("Failed to read file path from terminal");
     }
 
 
