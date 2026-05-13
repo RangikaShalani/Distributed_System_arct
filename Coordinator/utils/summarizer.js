@@ -9,12 +9,12 @@ module.exports = function summarizeChunk(chunk = []) {
         if (!summary[severity]) {
             summary[severity] = {
                 count: 0,
-                // messages: new Set(),
+                messages: new Set(),
             };
         }
 
         summary[severity].count += 1;
-        // summary[severity].messages.add(line);
+        summary[severity].messages.add(line);
     }
 
     return Object.fromEntries(
@@ -22,7 +22,7 @@ module.exports = function summarizeChunk(chunk = []) {
             severity,
             {
                 count: value.count,
-                // messages: Array.from(value.messages).sort(),
+                messages: Array.from(value.messages).sort(),
             },
         ])
     );
